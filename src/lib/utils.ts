@@ -216,6 +216,40 @@ export function mcpProxy({
       error: message.error,
     })
 
+    // disolutionsFL fork patch (reinit-on-reconnect):
+    //
+    // The SDK's EventSource auto-reconnects on SSE drop, but neither
+    // SSEClientTransport nor the wrapping Client are notified — so the Client
+    // keeps `initialized = true` across reconnects. After the remote MCP
+    // server (e.g. mcp-proxy on a different host) restarts and allocates a
+    // fresh server-side session, every request from this Client is rejected
+    // with -32602 / "Received request before initialization was complete"
+    // because the new session was never `initialize`d.
+    //
+    // The cleanest in-place fix is non-trivial (recreate the transport,
+    // re-run initialize, replay pending requests). A simpler robust fix:
+    // forward the error to the host once, then exit. Hosts that spawn
+    // mcp-remote as a long-lived stdio child (Claude Desktop, openclaw, etc.)
+    // respawn it on the next tool call, which reissues `initialize` against
+    // the new server cleanly. The host's natural tool-call retry covers the
+    // user-visible turn.
+    if (
+      message.error?.code === -32602 &&
+      typeof message.error.message === 'string' &&
+      /initialization was complete|not initialized|invalid session/i.test(message.error.message)
+    ) {
+      log(
+        '[mcp-remote] Server reports session not initialized (likely backend restart). ' +
+          'Forwarding error and exiting so the host can respawn with a fresh handshake.',
+      )
+      debugLog('Detected uninitialized-session error; exiting after forwarding', { error: message.error })
+      transportToClient
+        .send(message)
+        .catch(onClientError)
+        .finally(() => setTimeout(() => process.exit(2), 200))
+      return
+    }
+
     transportToClient.send(message).catch(onClientError)
   }
 
