@@ -35,6 +35,19 @@ arguably belongs upstream in `SSEClientTransport` itself.
 **Code:** `src/lib/utils.ts`, inside `mcpProxy`'s `transportToServer.onmessage`
 handler. Marked with the comment `disolutionsFL fork patch (reinit-on-reconnect)`.
 
+**Subprocess-group cleanup (2026-05-04 update):** before `process.exit(2)`,
+the patch now sends `SIGTERM` to the entire process group via
+`process.kill(-process.getpgid(0), 'SIGTERM')`. This fixes a follow-on issue
+we hit on the OpenClaw gateway: when `npx -y github:disolutionsFL/mcp-remote`
+spawns this binary, the chain is `npm exec` -> `sh -c` -> `node`. A bare
+`process.exit(2)` only terminates the node process; npm and sh hang around as
+orphans. Over ~24h the host accumulates hundreds of zombie subprocess trees
+(we saw 1069 tasks / 4.2 GB on the openclaw-gateway service before restarting
+it), eventually causing silent MCP tool-call hangs from FD pressure.
+Signaling the whole process group ensures npm and sh exit too, so the host
+can respawn a clean tree on the next tool call. Skipped on Windows (no POSIX
+process groups; the exit-and-respawn path is less leaky there anyway).
+
 **Build hook:** the `prepare` script in `package.json` runs `tsup` on install
 so `npx -y github:disolutionsFL/mcp-remote` auto-builds the `dist/` after
 cloning (devDependencies are pulled by npm during git installs).

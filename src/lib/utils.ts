@@ -246,7 +246,32 @@ export function mcpProxy({
       transportToClient
         .send(message)
         .catch(onClientError)
-        .finally(() => setTimeout(() => process.exit(2), 200))
+        .finally(() => {
+          // Tear down the entire process group before exiting so the parent
+          // npm/sh wrappers don't survive as orphans. Without this, hosts that
+          // spawn mcp-remote via `npx -y github:...` accumulate zombie
+          // subprocess trees on every reconnect (npm exec -> sh -c -> node),
+          // causing FD pressure and silent tool-call hangs after ~24h.
+          // Observed on C3PO 2026-05-04: 1069 tasks / 4.2 GB before gateway
+          // restart, 11 tasks / 834 MB after.
+          //
+          // process.kill(-pgid) signals the whole process group. We're
+          // typically NOT the group leader in the npx-spawned chain (npm is),
+          // so signaling the negative PGID reaches all three (npm/sh/node).
+          // Skipped on Windows where POSIX groups don't apply; the plain
+          // exit-and-respawn path is fine there because Node/npm cleanup is
+          // less leaky to begin with.
+          if (process.platform !== 'win32') {
+            try {
+              const pgid = process.getpgid(0)
+              process.kill(-pgid, 'SIGTERM')
+            } catch {
+              // Best-effort: group may already be gone, or the host launched
+              // us in a way that denies group signals. Fall through to exit.
+            }
+          }
+          setTimeout(() => process.exit(2), 200)
+        })
       return
     }
 
